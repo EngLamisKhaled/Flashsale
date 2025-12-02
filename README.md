@@ -100,6 +100,8 @@ Returns:
   "price": 1000,
   "available_stock": 97
 }
+
+---
 Algorithm:
 
 -Load product.
