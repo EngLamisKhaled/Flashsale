@@ -1,59 +1,115 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+# ⚡ Flash Sale Checkout System (Laravel 11)
+A backend system designed for **high-load flash sales**, focusing on:
+- **Strong Concurrency Guarantees**
+- **Overselling Protection**
+- **Idempotent Payment Webhooks**
+- **Short-lived Inventory Holds**
+- **Correctness under race conditions**
+- **Graceful handling of out-of-order events**
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+This project simulates a real-world flash-sale backend similar to:
+Amazon Lightning Deals, Noon White Friday, Souq Flash Sales, Paymob/Stripe-based checkouts.
 
-## About Laravel
+All logic is implemented using **Laravel 11**, **MySQL/InnoDB**, and **transaction-level locking**.
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+---
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
+## 🧱 System Overview
 
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
+The system sells a **single flash-sale product** with limited stock.  
+To prevent overselling during heavy concurrency:
 
-## Learning Laravel
+1. Users **reserve (hold)** stock for a short window (e.g. 2 minutes).  
+2. Users must create an **Order** before the hold expires.  
+3. A **payment provider** sends a webhook confirming success/failure.  
+4. A **scheduled background job** expires unused holds.
+5. **Idempotency keys** prevent duplicate processing of the same webhook.
+6. **Pessimistic database locking (`SELECT … FOR UPDATE`)** ensures correctness under parallel traffic.
 
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework. You can also check out [Laravel Learn](https://laravel.com/learn), where you will be guided through building a modern Laravel application.
+---
 
-If you don't feel like reading, [Laracasts](https://laracasts.com) can help. Laracasts contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
+## 🗂 Database Schema
 
-## Laravel Sponsors
+### **1. `products`**
+| Field | Type | Description |
+|-------|--------|----------------|
+| id | PK | Product ID |
+| name | string | Product name |
+| price | int | Price in EGP |
+| stock_total | int | Total units allocated for flash sale |
+| stock_sold | int | Units already sold (confirmed) |
 
-We would like to extend our thanks to the following sponsors for funding Laravel development. If you are interested in becoming a sponsor, please visit the [Laravel Partners program](https://partners.laravel.com).
+**Invariant:**  
+`available_stock = stock_total - stock_sold - active_holds`
 
-### Premium Partners
+---
 
-- **[Vehikl](https://vehikl.com)**
-- **[Tighten Co.](https://tighten.co)**
-- **[Kirschbaum Development Group](https://kirschbaumdevelopment.com)**
-- **[64 Robots](https://64robots.com)**
-- **[Curotec](https://www.curotec.com/services/technologies/laravel)**
-- **[DevSquad](https://devsquad.com/hire-laravel-developers)**
-- **[Redberry](https://redberry.international/laravel-development)**
-- **[Active Logic](https://activelogic.com)**
+### **2. `holds`** (short-lived reservations)
 
-## Contributing
+| Field | Type | Description |
+|--------|--------|----------------|
+| id | PK | Hold ID |
+| product_id | FK | Related product |
+| qty | int | Reserved quantity |
+| status | enum | `active`, `used`, `completed`, `expired`, `canceled` |
+| expires_at | timestamp | Expiry time |
+| created_at | timestamp | — |
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+**Behavior:**
+- Immediately reduces stock availability.  
+- Used only once to create an order.  
+- Auto-expires in background.
 
-## Code of Conduct
+---
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
+### **3. `orders`**
 
-## Security Vulnerabilities
+| Field | Type | Description |
+|--------|--------|----------------|
+| id | PK |
+| product_id | FK |
+| hold_id | FK |
+| qty | int |
+| total_price | int |
+| status | enum | `pending`, `paid`, `canceled` |
 
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+---
 
-## License
+### **4. `payment_events`** (Idempotency storage)
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+| Field | Type | Description |
+|--------|--------|----------------|
+| id | PK |
+| order_id | FK |
+| idempotency_key | string (unique) |
+| status | string (`success/failure`) |
+| raw_payload | json | Full webhook body |
+
+---
+
+## 🔄 API Endpoints
+
+### ✔ **1. Get Product Availability**  
+`GET /api/products/{id}`
+
+Returns:
+```json
+{
+  "id": 1,
+  "name": "Flash Product",
+  "price": 1000,
+  "available_stock": 97
+}
+Algorithm:
+
+-Load product.
+
+-Compute active holds:
+
+holds where status in ('active','used')
+      and expires_at > now()
+
+-Return:
+
+available = stock_total - stock_sold - active_holds_sum
+
