@@ -1,4 +1,4 @@
-# ⚡ Flash Sale Checkout System (Laravel 11)
+# ⚡ Flash Sale Checkout System (Laravel 12)
 
 A backend system designed for **high-load flash sales**, focusing on:
 - **Strong Concurrency Guarantees**
